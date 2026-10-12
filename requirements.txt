@@ -17,3 +17,4 @@ uwuipy
 xxhash
 typing_extensions
 aiomysql
+tzdata

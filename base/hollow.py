@@ -13,6 +13,8 @@ import asyncmy
 
 from base.database import Database
 
+import base.env  # noqa: F401  (loads .env into os.environ first)
+
 from discord import (
     AllowedMentions,
     Message,
@@ -273,20 +275,56 @@ class Bot(AutoShardedBot):
                     f"Extension failed to load: {module}\n{traceback.format_exc()}"
                 )
 
+    @staticmethod
+    def _db_config() -> dict:
+        """Database connection settings from the environment.
+
+        Required: DB_HOST, DB_USER, DB_PASSWORD, DB_NAME.
+        Optional: DB_PORT (default 3306), DB_POOL_MAX (default 30),
+        DB_POOL_MIN (default 2), DB_CONNECT_TIMEOUT (default 10).
+
+        Raises RuntimeError with a sanitized message (never echoes the
+        password) when required settings are missing so misconfiguration
+        fails fast instead of connecting with defaults.
+        """
+        host = os.getenv("DB_HOST", "").strip()
+        user = os.getenv("DB_USER", "").strip()
+        password = os.getenv("DB_PASSWORD", "")
+        name = os.getenv("DB_NAME", "").strip()
+        missing = [k for k, v in (("DB_HOST", host), ("DB_USER", user), ("DB_PASSWORD", password), ("DB_NAME", name)) if not v]
+        if missing:
+            raise RuntimeError(
+                "Missing database configuration: "
+                + ", ".join(missing)
+                + ". Set them in the environment or a .env file (see .env.example)."
+            )
+        try:
+            port = int(os.getenv("DB_PORT", "3306"))
+            maxsize = int(os.getenv("DB_POOL_MAX", "30"))
+            minsize = int(os.getenv("DB_POOL_MIN", "2"))
+            connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid numeric database setting: {exc}")
+        return {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "db": name,
+            "maxsize": maxsize,
+            "minsize": minsize,
+            "connect_timeout": connect_timeout,
+            "autocommit": True,
+        }
+
     async def _load_database(self) -> Database:
         try:
-            pool = await asyncmy.create_pool(
-                host="de21.spaceify.eu",
-                port=3306,
-                user="u56717_T3XxKfsHDF",
-                password="Q3YNNCkSI+Hu4IS7Ls4xKVn@",
-                db="s56717_database",
-                maxsize=30,
-                minsize=2,
-                connect_timeout=10,
-                autocommit=True,
+            config = self._db_config()
+            pool = await asyncmy.create_pool(**config)
+            logger.info(
+                f"Database connection established to {config['host']}:{config['port']} "
+                f"as {config['user']} (db={config['db']})"
             )
-            logger.info("Database connection established")
             database = Database(pool)
 
             schema_path = pathlib.Path(__file__).parent.parent / "base" / "schema" / "schema.sql"
@@ -316,6 +354,8 @@ class Bot(AutoShardedBot):
                         try:
                             await database.execute(statement)
                         except Exception as e:
+                            if self._is_duplicate_column(e):
+                                continue
                             logger.error(
                                 f"Failed to run schema statement: {e}\n{statement.strip()}"
                             )
@@ -355,17 +395,22 @@ class Bot(AutoShardedBot):
 
     @staticmethod
     def _is_duplicate_column(exc: Exception) -> bool:
-        """Return ``True`` for the MySQL error raised by a re-run migration.
+        """Return ``True`` for idempotent re-run errors that are safe to swallow.
 
         Error 1060 (ER_DUP_FIELDNAME) is what ``ALTER TABLE ... ADD COLUMN``
         reports when the column already exists, i.e. when the migration was
-        applied on a previous boot; that one is expected and safe to ignore.
+        applied on a previous boot. Error 1050 (ER_TABLE_EXISTS_ERROR) can
+        surface the same way for ``CREATE TABLE`` when the existence check
+        raced the create (or the server surfaces ``IF NOT EXISTS`` as a
+        warning the driver promotes); that one is equally expected and safe
+        to ignore.
         """
         args: tuple = getattr(exc, "args", ()) or ()
         code = args[0] if args else None
-        if code == 1060:
+        if code in (1050, 1060):
             return True
-        return "duplicate column" in str(exc).lower()
+        text = str(exc).lower()
+        return "duplicate column" in text or "already exists" in text
 
     @staticmethod
     def _table_name(statement: str) -> Optional[str]:

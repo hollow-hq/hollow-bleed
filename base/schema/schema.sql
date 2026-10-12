@@ -574,3 +574,132 @@ CREATE TABLE IF NOT EXISTS highlight_ignores (
 
 -- migrate giveaways: minimum member level required to enter a giveaway.
 ALTER TABLE giveaways ADD COLUMN required_level INT NULL;
+
+-- =========================================================================
+-- Moderation expansion (modsys): cases, notes, reminders, temp actions,
+-- jail, sticky roles, hardbans, command restrictions.
+-- New tables only (CREATE IF NOT EXISTS) so existing installs are untouched.
+-- =========================================================================
+
+CREATE TABLE IF NOT EXISTS mod_cases (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    case_id INT NOT NULL,
+    user_id BIGINT NOT NULL,
+    moderator_id BIGINT NOT NULL,
+    action VARCHAR(32) NOT NULL,
+    reason TEXT NULL,
+    proof TEXT NULL,
+    attachments TEXT NULL,
+    created_at BIGINT NOT NULL,
+    expires_at BIGINT NULL,
+    active TINYINT(1) NOT NULL DEFAULT 1,
+    UNIQUE KEY uniq_mod_case (guild_id, case_id),
+    KEY idx_mod_case_user (guild_id, user_id),
+    KEY idx_mod_case_mod (guild_id, moderator_id),
+    KEY idx_mod_case_action (guild_id, action)
+);
+
+CREATE TABLE IF NOT EXISTS mod_notes (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    moderator_id BIGINT NOT NULL,
+    note TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    KEY idx_mod_notes_user (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    channel_id BIGINT NULL,
+    content TEXT NOT NULL,
+    remind_at BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    done TINYINT(1) NOT NULL DEFAULT 0,
+    KEY idx_reminders_due (done, remind_at),
+    KEY idx_reminders_user (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS temp_actions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    action VARCHAR(16) NOT NULL,
+    role_id BIGINT NULL,
+    data TEXT NULL,
+    expires_at BIGINT NOT NULL,
+    active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at BIGINT NOT NULL,
+    KEY idx_temp_due (active, expires_at),
+    KEY idx_temp_user (guild_id, user_id, action)
+);
+
+CREATE TABLE IF NOT EXISTS jail_config (
+    guild_id BIGINT PRIMARY KEY,
+    role_id BIGINT NULL
+);
+
+CREATE TABLE IF NOT EXISTS jail_state (
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    role_ids TEXT NULL,
+    expires_at BIGINT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS sticky_roles (
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, role_id),
+    KEY idx_sticky_user (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS hardbans (
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    reason TEXT NULL,
+    moderator_id BIGINT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS restrict_commands (
+    guild_id BIGINT NOT NULL,
+    command VARCHAR(64) NOT NULL,
+    role_id BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, command, role_id),
+    KEY idx_restrict_cmd (guild_id, command)
+);
+
+CREATE TABLE IF NOT EXISTS mute_config (
+    guild_id BIGINT PRIMARY KEY,
+    role_id BIGINT NULL
+);
+
+-- =========================================================================
+-- Information cog: last-seen tracking and user time zones
+-- =========================================================================
+
+-- One row per (guild, member) holding the last time the member sent a
+-- message the bot could see. Written by the information cog's on_message
+-- listener (`seen` command reads it). `last_seen`/`channel_id` are plain
+-- epoch seconds / snowflakes.
+CREATE TABLE IF NOT EXISTS last_seen (
+    guild_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    last_seen BIGINT NOT NULL,
+    channel_id BIGINT NULL,
+    PRIMARY KEY (guild_id, user_id),
+    KEY idx_last_seen_time (guild_id, last_seen)
+);
+
+-- One row per user holding a validated IANA time-zone identifier for the
+-- `timezone` command group. User-scoped (not per-guild) like birthdays.
+CREATE TABLE IF NOT EXISTS timezones (
+    user_id BIGINT PRIMARY KEY,
+    tz VARCHAR(64) NOT NULL
+);

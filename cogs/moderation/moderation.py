@@ -38,6 +38,9 @@ from discord import (
     ui,
     Interaction,
     VoiceChannel,
+    Forbidden,
+    HTTPException,
+    NotFound,
 )
 from discord.app_commands import (
     allowed_installs,
@@ -61,9 +64,12 @@ from difflib import get_close_matches
 from PIL import Image
 from colorthief import ColorThief
 
+from .modsys import ModSysMixin
 
-class Moderation(CogMeta):
+
+class Moderation(ModSysMixin, CogMeta):
     role_lock = defaultdict(asyncio.Lock)
+    _mass_tasks: dict = {}
 
     @hybrid_command(
         name="ban",
@@ -98,9 +104,21 @@ class Moderation(CogMeta):
                 await confirmation_view.send_confirmation()
             else:
                 await user.ban(reason=reason, delete_message_days=7)
+                try:
+                    await self._mod_log_case(
+                        ctx.guild.id, user.id, ctx.author.id, "ban", reason  # type: ignore
+                    )
+                except Exception:
+                    pass
                 return await ctx.approve(f"{user.mention} has been **banned**.")
         else:
             await ctx.guild.ban(user, reason=reason)  # type: ignore
+            try:
+                await self._mod_log_case(
+                    ctx.guild.id, user.id, ctx.author.id, "ban", reason  # type: ignore
+                )
+            except Exception:
+                pass
             return await ctx.approve(f"{user.mention} has been **banned**.")
 
     @hybrid_command(name="kick", description="Kicks a user from the server", example="kick @voby spamming")
@@ -127,6 +145,12 @@ class Moderation(CogMeta):
                 await confirmation_view.send_confirmation()
             else:
                 await user.kick(reason=reason)
+                try:
+                    await self._mod_log_case(
+                        ctx.guild.id, user.id, ctx.author.id, "kick", reason  # type: ignore
+                    )
+                except Exception:
+                    pass
                 return await ctx.approve(f"{user.mention} has been **kicked**.")
 
     @hybrid_command(name="nuke", description="Nukes the channel", example="nuke #channel")
@@ -138,20 +162,23 @@ class Moderation(CogMeta):
         confirmation = NukeConfirm(ctx, channel=channel)
         await confirmation.send_confirmation()
 
-    @hybrid_command(
+    @hybrid_group(
         name="forcenickname",
-        aliases=["fn"],
-        description="force a nickname upon a user.",
+        aliases=["fn", "forcenick", "freezenick"],
+        invoke_without_command=True,
+        description="Force a member's nickname.",
         example="forcenickname @voby New Name",
     )
     @has_permissions(moderate_members=True)
     async def forcenickname(
         self,
         ctx: Context,
-        user: discord.Member,
+        user: discord.Member = None,  # type: ignore
         *,
         name: str = None,  # type: ignore
     ):
+        if user is None:
+            return await ctx.send_help(ctx.command)
         if name is None:
             check = await self.bot.pool.fetchrow(
                 "SELECT name FROM forcenick WHERE guild_id = %s AND user_id = %s",
@@ -194,6 +221,44 @@ class Moderation(CogMeta):
             return await ctx.approve(
                 f"Now **forcing nickname** for **{user.name}** to `{name}`"
             )
+
+    @forcenickname.command(
+        name="list",
+        aliases=["view"],
+        description="View all forced nicknames.",
+        example="forcenickname list",
+    )
+    @has_permissions(moderate_members=True)
+    async def forcenickname_list(self, ctx: Context):
+        rows = await self.bot.pool.fetch(
+            "SELECT user_id, name FROM forcenick WHERE guild_id = %s",
+            ctx.guild.id,  # type: ignore
+        )
+        if not rows:
+            return await ctx.warn("No **forced nicknames** set.")
+        entries = []
+        for i, row in enumerate(rows, start=1):
+            member = ctx.guild.get_member(row["user_id"])  # type: ignore
+            label = member.mention if member else f"`{row['user_id']}`"
+            entries.append(f"`{i}` {label} → `{row['name']}`")
+        embeds = []
+        embed = Embed(color=COLORS.neutral, title="Forced nicknames", description="")
+        count = 0
+        for entry in entries:
+            embed.description += f"{entry}\n"  # type: ignore
+            count += 1
+            if count == 10:
+                embeds.append(embed)
+                embed = Embed(
+                    color=COLORS.neutral, title="Forced nicknames", description=""
+                )
+                count = 0
+        if count > 0:
+            embeds.append(embed)
+        if len(embeds) > 1:
+            await ctx.paginate(embeds)
+        else:
+            await ctx.send(embed=embeds[0])
 
     @Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
@@ -244,7 +309,7 @@ class Moderation(CogMeta):
 
         await ctx.message.add_reaction("🔒")
 
-    @lockdown.command(name="all", description="Locks all the channels.")
+    @lockdown.command(name="all", description="Locks all the channels.", example="lockdown all")
     @has_permissions(manage_channels=True)
     async def lockdown_all(self, ctx: Context):
         lockdown_role_id = await self.bot.pool.fetchval(
@@ -315,7 +380,7 @@ class Moderation(CogMeta):
                 f"I will now **ignore** {channel.mention} from **lockdown** commands."
             )
 
-    @lockdown.command(name="ignored", description="See a list of ignored channels.")
+    @lockdown.command(name="ignored", description="See a list of ignored channels.", example="lockdown ignored")
     @has_permissions(manage_channels=True)
     async def lockdown_ignored(self, ctx: Context):
         ignored_channels = await self.bot.pool.fetch(
@@ -390,7 +455,7 @@ class Moderation(CogMeta):
             f"{role.mention} is now set as the **default lock role**."
         )
 
-    @hybrid_group(name="unlock", invoke_without_command=True, description="Unlocks a channel.", example="unlock #channel raid over")
+    @hybrid_group(name="unlock", aliases=["unlockdown"], invoke_without_command=True, description="Unlocks a channel.", example="unlock #channel raid over")
     @has_permissions(manage_channels=True)
     async def unlock(
         self,
@@ -421,7 +486,7 @@ class Moderation(CogMeta):
 
         await ctx.message.add_reaction("🔓")
 
-    @unlock.command(name="all", description="Unlocks all the channels")
+    @unlock.command(name="all", description="Unlocks all the channels", example="unlock all")
     @has_permissions(manage_channels=True)
     async def unlock_all(self, ctx: Context):
         lockdown_role_id = await self.bot.pool.fetchval(
@@ -470,7 +535,7 @@ class Moderation(CogMeta):
     @hybrid_group(
         name="purge",
         description="Purge messages.",
-        aliases=["c"],
+        aliases=["c", "prune"],
         invoke_without_command=True,
         example="purge 50",
     )
@@ -534,7 +599,7 @@ class Moderation(CogMeta):
     @purge.command(
         name="attachments",
         description="Purge messages containing attachments.",
-        aliases=["images", "pictures", "files"],
+        aliases=["pictures", "attachment"],
         example="purge attachments 50",
     )
     @has_permissions(manage_messages=True)
@@ -706,7 +771,7 @@ class Moderation(CogMeta):
                 color=0x38A9E1,
             )
 
-    @role.command(name="create", aliases=["add"], description="Create a role", example="role create New Role")
+    @role.command(name="create", aliases=["make"], description="Create a role", example="role create New Role")
     @has_permissions(manage_roles=True)
     async def role_create(self, ctx: Context, *, name: str):
         role = await ctx.guild.create_role(name=name)
@@ -758,9 +823,14 @@ class Moderation(CogMeta):
         await role.edit(color=color)
         return await ctx.approve(f"Role {role.mention}'s **color** changed to `{hex}`")
 
+    # NOTE: `role` itself is nested under /moderation for slash, so Discord
+    # allows only one level beneath it. The remove variants below are flat
+    # `role humans_remove` / `role bots_remove` / `role has_remove` commands
+    # (not `role humans remove` subgroups) so slash registration stays valid.
+    # Prefix users get the same coverage without deep nesting.
     @role.command(name="humans", description="Give all humans a role.", example="role humans @role")
     @has_permissions(manage_roles=True)
-    async def role_humans(self, ctx: Context, *, role: Role):
+    async def role_humans(self, ctx: Context, *, role: Role):  # type: ignore
         async with self.role_lock[ctx.guild.id]:
             tasks = [
                 m.add_roles(role, reason=f"Role added by {ctx.author}")
@@ -807,6 +877,12 @@ class Moderation(CogMeta):
     @has_permissions(moderate_members=True)
     async def unban(self, ctx: Context, *, user: User):
         await ctx.guild.unban(user)
+        try:
+            await self._mod_log_case(
+                ctx.guild.id, user.id, ctx.author.id, "unban", f"Unbanned by {ctx.author}"  # type: ignore
+            )
+        except Exception:
+            pass
         return await ctx.approve(f"{user.mention} has been **unbanned.**")
 
     @hybrid_command(name="mute", description="mute a member", example="mute @member 10m")
@@ -838,6 +914,12 @@ class Moderation(CogMeta):
                 utcnow() + timedelta(seconds=time),
                 reason=f"User timed out by {ctx.author}",
             )
+            try:
+                await self._mod_log_case(
+                    ctx.guild.id, member.id, ctx.author.id, "mute", f"Muted by {ctx.author} for {humanfriendly.format_timespan(time)}"  # type: ignore
+                )
+            except Exception:
+                pass
             return await ctx.approve(f"**{member.name}** is now muted for {humanfriendly.format_timespan(time)}")
         except Exception as E:
             return await ctx.warn(f"I'm **unable** to mute this user.")
@@ -864,12 +946,18 @@ class Moderation(CogMeta):
             pass
 
         await member.timeout(None)
+        try:
+            await self._mod_log_case(
+                ctx.guild.id, member.id, ctx.author.id, "unmute", f"Unmuted by {ctx.author}"  # type: ignore
+            )
+        except Exception:
+            pass
         return await ctx.embed(
             description=f"{ctx.author.mention}: **{member.name}** is now unmuted.",
             color=COLORS.red,
         )
 
-    @hybrid_group(name="channel", invoke_without_command=True, description="Edit channels.")
+    @hybrid_group(name="channel", invoke_without_command=True, description="Edit channels.", example="channel")
     @has_permissions(manage_channels=True)
     async def channel(self, ctx: Context):
         return await ctx.send_help(ctx.command)
@@ -919,14 +1007,666 @@ class Moderation(CogMeta):
         await channel.set_permissions(ctx.guild.default_role, view_channel=True)
         return await ctx.approve(f"**{channel.name}** has now been revealed.")
 
-    @hybrid_command(name="hide", description="Hide a channel..", example="hide #channel")
+    @hybrid_command(name="hide", description="Hide a channel.", example="hide #channel")
     @has_permissions(manage_channels=True)
-    async def hide(self, ctx: Context, *, channel: TextChannel = None):
+    async def hide(
+        self,
+        ctx: Context,
+        channel: TextChannel = None,  # type: ignore
+        target: Union[Role, Member] = None,  # type: ignore
+    ):
         if channel is None:
             channel = ctx.channel
+        overwrite_target = target or ctx.guild.default_role  # type: ignore
+        try:
+            await channel.set_permissions(overwrite_target, view_channel=False)
+        except (Forbidden, HTTPException) as exc:  # type: ignore
+            return await ctx.warn(f"I cannot hide {channel.mention}: `{exc}`")
+        label = (
+            overwrite_target.mention  # type: ignore
+            if target is not None
+            else "the server"
+        )
+        return await ctx.approve(f"**{channel.name}** hidden from {label}.")
 
-        await channel.set_permissions(ctx.guild.default_role, view_channel=False)
-        return await ctx.approve(f"**{channel.name}** has now been hidden.")
+
+    # ------------------------------------------------------------------
+    # Shared helpers for group extensions (roles / purge)
+    # ------------------------------------------------------------------
+
+    def _role_assignable(self, ctx: Context, role: Role) -> bool:
+        try:
+            if role.is_default():
+                return False
+            if role.position >= ctx.guild.me.top_role.position:  # type: ignore
+                return False
+            if ctx.author.id != ctx.guild.owner_id:  # type: ignore
+                if role.position >= ctx.author.top_role.position:
+                    return False
+                if role.permissions.administrator:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    async def _mass_role_add(self, ctx: Context, targets, role: Role) -> int:
+        key = (ctx.guild.id, "add", role.id)  # type: ignore
+        done = 0
+
+        async def _run():
+            nonlocal done
+            for member in targets:
+                try:
+                    await member.add_roles(
+                        role, reason=f"Mass role add by {ctx.author}"
+                    )
+                    done += 1
+                except Exception:
+                    continue
+                await asyncio.sleep(0.25)
+
+        task = asyncio.create_task(_run())
+        self._mass_tasks[key] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._mass_tasks.pop(key, None)
+        return done
+
+    async def _mass_role_remove(self, ctx: Context, targets, role: Role) -> int:
+        key = (ctx.guild.id, "remove", role.id)  # type: ignore
+        done = 0
+
+        async def _run():
+            nonlocal done
+            for member in targets:
+                try:
+                    await member.remove_roles(
+                        role, reason=f"Mass role remove by {ctx.author}"
+                    )
+                    done += 1
+                except Exception:
+                    continue
+                await asyncio.sleep(0.25)
+
+        task = asyncio.create_task(_run())
+        self._mass_tasks[key] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._mass_tasks.pop(key, None)
+        return done
+
+    @staticmethod
+    def _extract_message_id(value: str) -> Union[int, None]:
+        try:
+            text = str(value).strip().strip("<>")
+            match = re.search(r"(\d{15,25})", text)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            return None
+        return None
+
+    async def _purge_filtered(self, ctx: Context, check, amount: int = 50):
+        amount = max(1, min(int(amount or 50), 500))
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        try:
+            deleted = await ctx.channel.purge(  # type: ignore
+                limit=amount,
+                check=check,
+                bulk=True,
+                reason=f"Purged by {ctx.author.name}",
+            )
+        except Forbidden:
+            return await ctx.warn("I lack permission to delete messages here.")
+        except HTTPException as exc:
+            return await ctx.warn(f"Purge failed: `{exc}`")
+        if not deleted:
+            return await ctx.warn("No matching messages found.")
+        return await ctx.approve(f"Purged **{len(deleted)}** message(s).")
+
+    # ------------------------------------------------------------------
+    # Purge filters (extend existing purge group; no existing names touched)
+    # ------------------------------------------------------------------
+
+    @purge.command(name="after", description="Purge messages after a message link.", example="purge after https://discord.com/.../123")
+    @has_permissions(manage_messages=True)
+    async def purge_after(self, ctx: Context, message_link: str, amount: int = 100):
+        ref_id = self._extract_message_id(message_link)
+        if not ref_id:
+            return await ctx.warn("Provide a valid **message link or ID**.")
+        try:
+            ref = await ctx.channel.fetch_message(ref_id)  # type: ignore
+        except (NotFound, HTTPException):
+            return await ctx.warn("I cannot find that message in this channel.")
+        amount = max(1, min(int(amount or 100), 500))
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        try:
+            deleted = await ctx.channel.purge(  # type: ignore
+                limit=amount,
+                after=ref,
+                check=lambda m: not m.pinned,
+                bulk=True,
+                reason=f"Purged by {ctx.author.name}",
+            )
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Purge failed: `{exc}`")
+        return await ctx.approve(f"Purged **{len(deleted)}** message(s) after the given message.")
+
+    @purge.command(name="before", description="Purge messages before a message link.", example="purge before https://discord.com/.../123")
+    @has_permissions(manage_messages=True)
+    async def purge_before(self, ctx: Context, message_link: str, amount: int = 100):
+        ref_id = self._extract_message_id(message_link)
+        if not ref_id:
+            return await ctx.warn("Provide a valid **message link or ID**.")
+        try:
+            ref = await ctx.channel.fetch_message(ref_id)  # type: ignore
+        except (NotFound, HTTPException):
+            return await ctx.warn("I cannot find that message in this channel.")
+        amount = max(1, min(int(amount or 100), 500))
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        try:
+            deleted = await ctx.channel.purge(  # type: ignore
+                limit=amount,
+                before=ref,
+                check=lambda m: not m.pinned,
+                bulk=True,
+                reason=f"Purged by {ctx.author.name}",
+            )
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Purge failed: `{exc}`")
+        return await ctx.approve(f"Purged **{len(deleted)}** message(s) before the given message.")
+
+    @purge.command(name="between", aliases=["bt"], description="Purge messages between two message links.", example="purge between 123 456")
+    @has_permissions(manage_messages=True)
+    async def purge_between(self, ctx: Context, start_id: str, finish_id: str):
+        start = self._extract_message_id(start_id)
+        finish = self._extract_message_id(finish_id)
+        if not start or not finish:
+            return await ctx.warn("Provide two valid **message links or IDs**.")
+        try:
+            first = await ctx.channel.fetch_message(min(start, finish))  # type: ignore
+            last = await ctx.channel.fetch_message(max(start, finish))  # type: ignore
+        except (NotFound, HTTPException):
+            return await ctx.warn("I cannot find those messages in this channel.")
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        try:
+            deleted = await ctx.channel.purge(  # type: ignore
+                limit=500,
+                after=first,
+                before=last,
+                check=lambda m: not m.pinned,
+                bulk=True,
+                reason=f"Purged by {ctx.author.name}",
+            )
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Purge failed: `{exc}`")
+        if not deleted:
+            return await ctx.warn("No messages found between those two messages.")
+        return await ctx.approve(f"Purged **{len(deleted)}** message(s) between the given messages.")
+
+    @purge.command(name="upto", description="Purge messages up to a message link.", example="purge upto https://discord.com/.../123")
+    @has_permissions(manage_messages=True)
+    async def purge_upto(self, ctx: Context, message_link: str, amount: int = 100):
+        ref_id = self._extract_message_id(message_link)
+        if not ref_id:
+            return await ctx.warn("Provide a valid **message link or ID**.")
+        try:
+            ref = await ctx.channel.fetch_message(ref_id)  # type: ignore
+        except (NotFound, HTTPException):
+            return await ctx.warn("I cannot find that message in this channel.")
+        amount = max(1, min(int(amount or 100), 500))
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        try:
+            deleted = await ctx.channel.purge(  # type: ignore
+                limit=amount,
+                after=ref,
+                check=lambda m: not m.pinned,
+                bulk=True,
+                reason=f"Purged by {ctx.author.name}",
+            )
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Purge failed: `{exc}`")
+        return await ctx.approve(f"Purged **{len(deleted)}** message(s) up to the given message.")
+
+    @purge.command(name="contains", description="Purge messages containing text.", example="purge contains hello 50")
+    @has_permissions(manage_messages=True)
+    async def purge_contains(self, ctx: Context, substring: str, amount: int = 50):
+        lowered = substring.lower()
+        return await self._purge_filtered(
+            ctx, lambda m: lowered in (m.content or "").lower() and not m.pinned, amount
+        )
+
+    @purge.command(name="startswith", description="Purge messages starting with text.", example="purge startswith ! 50")
+    @has_permissions(manage_messages=True)
+    async def purge_startswith(self, ctx: Context, substring: str, amount: int = 50):
+        lowered = substring.lower()
+        return await self._purge_filtered(
+            ctx,
+            lambda m: (m.content or "").lower().startswith(lowered) and not m.pinned,
+            amount,
+        )
+
+    @purge.command(name="endswith", description="Purge messages ending with text.", example="purge endswith ? 50")
+    @has_permissions(manage_messages=True)
+    async def purge_endswith(self, ctx: Context, substring: str, amount: int = 50):
+        lowered = substring.lower()
+        return await self._purge_filtered(
+            ctx,
+            lambda m: (m.content or "").lower().endswith(lowered) and not m.pinned,
+            amount,
+        )
+
+    @purge.command(name="embeds", aliases=["embed"], description="Purge messages containing embeds.", example="purge embeds 50")
+    @has_permissions(manage_messages=True)
+    async def purge_embeds(self, ctx: Context, amount: int = 50):
+        return await self._purge_filtered(
+            ctx, lambda m: bool(m.embeds) and not m.pinned, amount
+        )
+
+    @purge.command(name="files", description="Purge messages with file attachments.", example="purge files 50")
+    @has_permissions(manage_messages=True)
+    async def purge_files(self, ctx: Context, amount: int = 50):
+        return await self._purge_filtered(
+            ctx, lambda m: bool(m.attachments) and not m.pinned, amount
+        )
+
+    @purge.command(name="images", description="Purge images (attachments, embeds, links).", example="purge images 50")
+    @has_permissions(manage_messages=True)
+    async def purge_images(self, ctx: Context, amount: int = 50):
+        url_re = re.compile(r"https?://\S+\.(?:png|jpe?g|gif|webp)(?:\S*)?", re.IGNORECASE)
+
+        def _check(m):
+            if m.pinned:
+                return False
+            if m.attachments:
+                return True
+            if m.embeds:
+                for embed in m.embeds:
+                    if getattr(embed, "image", None) or getattr(embed, "thumbnail", None):
+                        return True
+            return bool(url_re.search(m.content or ""))
+
+        return await self._purge_filtered(ctx, _check, amount)
+
+    @purge.command(name="emotes", aliases=["emote"], description="Purge messages with custom emotes.", example="purge emotes 50")
+    @has_permissions(manage_messages=True)
+    async def purge_emotes(self, ctx: Context, amount: int = 50):
+        custom_re = re.compile(r"<a?:\w+:\d+>")
+        return await self._purge_filtered(
+            ctx,
+            lambda m: bool(custom_re.search(m.content or "")) and not m.pinned,
+            amount,
+        )
+
+    @purge.command(name="emoji", aliases=["emojis"], description="Purge messages with emojis.", example="purge emoji 50")
+    @has_permissions(manage_messages=True)
+    async def purge_emoji(self, ctx: Context, amount: int = 50):
+        custom_re = re.compile(r"<a?:\w+:\d+>")
+        return await self._purge_filtered(
+            ctx,
+            lambda m: bool(custom_re.search(m.content or "")) and not m.pinned,
+            amount,
+        )
+
+    @purge.command(name="reactions", description="Remove reactions from recent messages.", example="purge reactions 50")
+    @has_permissions(manage_messages=True)
+    async def purge_reactions(self, ctx: Context, amount: int = 50):
+        amount = max(1, min(int(amount or 50), 200))
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        cleared = 0
+        try:
+            async for message in ctx.channel.history(limit=amount):  # type: ignore
+                if message.reactions:
+                    try:
+                        await message.clear_reactions()
+                        cleared += 1
+                    except (Forbidden, HTTPException):
+                        continue
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Cannot read history: `{exc}`")
+        if not cleared:
+            return await ctx.warn("No reactions found to clear.")
+        return await ctx.approve(f"Cleared reactions from **{cleared}** message(s).")
+
+    @purge.command(name="activity", aliases=["activities"], description="Purge activity / system messages.", example="purge activity 50")
+    @has_permissions(manage_messages=True)
+    async def purge_activity(self, ctx: Context, amount: int = 50):
+        def _check(m):
+            if m.pinned:
+                return False
+            try:
+                if m.activity is not None:
+                    return True
+            except Exception:
+                pass
+            return m.type is not discord.MessageType.default
+
+        return await self._purge_filtered(ctx, _check, amount)
+
+    @purge.command(name="webhooks", description="Purge messages sent by webhooks.", example="purge webhooks 50")
+    @has_permissions(manage_messages=True)
+    async def purge_webhooks(self, ctx: Context, amount: int = 50):
+        return await self._purge_filtered(
+            ctx, lambda m: getattr(m, "webhook_id", None) is not None and not m.pinned, amount
+        )
+
+    # ------------------------------------------------------------------
+    # Role extensions (new subcommands only; existing ones untouched)
+    # ------------------------------------------------------------------
+
+    @role.command(name="add", aliases=["set", "give"], description="Add a role to a member.", example="role add @voby @role")
+    @has_permissions(manage_roles=True)
+    async def role_add(self, ctx: Context, user: Member, *, role: Role):
+        if role in user.roles:
+            return await ctx.warn(f"{user.mention} already has {role.mention}.")
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn(
+                "I cannot manage this role (it is above me or above you)."
+            )
+        try:
+            await user.add_roles(role, reason=f"Role added by {ctx.author}")
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Cannot add {role.mention}: `{exc}`")
+        return await ctx.embed(
+            description=f"{EMOJIS.ADD} {ctx.author.mention}: Added {role.mention} to {user.mention}",
+            color=0x38A9E1,
+        )
+
+    @role.command(name="remove", aliases=["rmv", "take"], description="Remove a role from a member.", example="role remove @voby @role")
+    @has_permissions(manage_roles=True)
+    async def role_remove(self, ctx: Context, user: Member, *, role: Role):
+        if role not in user.roles:
+            return await ctx.warn(f"{user.mention} does not have {role.mention}.")
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn(
+                "I cannot manage this role (it is above me or above you)."
+            )
+        try:
+            await user.remove_roles(role, reason=f"Role removed by {ctx.author}")
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Cannot remove {role.mention}: `{exc}`")
+        return await ctx.embed(
+            description=f"{EMOJIS.REMOVE} {ctx.author.mention}: Removed {role.mention} from {user.mention}",
+            color=0x38A9E1,
+        )
+
+    @role.command(name="edit", aliases=["editname", "rename"], description="Rename a role.", example="role edit @role New Name")
+    @has_permissions(manage_roles=True)
+    async def role_edit(self, ctx: Context, role: Role, *, name: str):
+        name = name.strip()
+        if not name or len(name) > 100:
+            return await ctx.warn("Provide a role name between 1 and 100 characters.")
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn("I cannot manage this role.")
+        try:
+            await role.edit(name=name, reason=f"Renamed by {ctx.author}")
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Cannot rename {role.mention}: `{exc}`")
+        return await ctx.approve(f"Renamed role to `{name}`.")
+
+    @role.command(name="icon", description="Set a role icon (emoji or image URL).", example="role icon @role 😀")
+    @has_permissions(manage_roles=True)
+    async def role_icon(self, ctx: Context, role: Role, *, icon: str = None):  # type: ignore
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn("I cannot manage this role.")
+        image_data = None
+        emoji = None
+        source = icon or ""
+        if ctx.message.attachments:
+            source = source or ctx.message.attachments[0].url
+        if source:
+            source = source.strip()
+            if re.match(r"^<a?:\w+:\d+>$", source):
+                emoji = source
+            elif source.startswith("http"):
+                try:
+                    import aiohttp as _aiohttp
+
+                    async with _aiohttp.ClientSession() as session:
+                        async with session.get(source, timeout=10) as resp:
+                            if resp.status != 200:
+                                return await ctx.warn("I cannot download that image.")
+                            image_data = await resp.read()
+                            if len(image_data) > 256 * 1024:
+                                return await ctx.warn("Role icons must be under 256KB.")
+                except Exception as exc:
+                    return await ctx.warn(f"Cannot fetch icon: `{exc}`")
+            elif len(source) <= 8:
+                emoji = source
+        try:
+            if emoji is not None:
+                await role.edit(display_icon=emoji, reason=f"Icon set by {ctx.author}")
+            elif image_data is not None:
+                await role.edit(display_icon=image_data, reason=f"Icon set by {ctx.author}")
+            else:
+                return await ctx.warn("Provide an emoji or an image URL / attachment.")
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Cannot set icon (server may lack the feature): `{exc}`")
+        return await ctx.approve(f"Updated the icon for {role.mention}.")
+
+    @role.command(name="restore", description="Restore a member's backup roles.", example="role restore @voby")
+    @has_permissions(manage_roles=True)
+    async def role_restore(self, ctx: Context, *, member: Member):
+        rows = await self.bot.pool.fetch(
+            "SELECT role_id FROM sticky_roles WHERE guild_id = %s AND user_id = %s",
+            ctx.guild.id,  # type: ignore
+            member.id,
+        )
+        backup = await self.bot.pool.fetchval(
+            "SELECT data FROM temp_actions WHERE guild_id = %s AND user_id = %s AND action = %s AND active = 0 ORDER BY id DESC LIMIT 1",
+            ctx.guild.id,  # type: ignore
+            member.id,
+            "rolebackup",
+        )
+        role_ids = [r["role_id"] for r in (rows or [])]
+        if backup:
+            try:
+                import json as _json
+
+                extra = _json.loads(backup) if isinstance(backup, str) else []
+                role_ids.extend(int(x) for x in extra if str(x).isdigit())
+            except Exception:
+                pass
+        role_ids = list(dict.fromkeys(role_ids))
+        if not role_ids:
+            return await ctx.warn(f"No restorable roles found for {member.mention}.")
+        restored = 0
+        for rid in role_ids:
+            role = ctx.guild.get_role(rid)  # type: ignore
+            if role is None or role in member.roles:
+                continue
+            if not self._role_assignable(ctx, role):
+                continue
+            try:
+                await member.add_roles(role, reason=f"Roles restored by {ctx.author}")
+                restored += 1
+            except Exception:
+                continue
+        if not restored:
+            return await ctx.warn("No roles could be restored (hierarchy or permissions).")
+        return await ctx.approve(f"Restored **{restored}** role(s) to {member.mention}.")
+
+    @role.command(name="bots", description="Add a role to all bots.", example="role bots @role")
+    @has_permissions(manage_roles=True)
+    async def role_bots(self, ctx: Context, *, role: Role):  # type: ignore
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn("I cannot manage this role.")
+        targets = [
+            m for m in ctx.guild.members  # type: ignore
+            if m.bot and role not in m.roles
+        ]
+        if not targets:
+            return await ctx.warn("All **bots** already have this role.")
+        await self._mass_role_add(ctx, targets, role)
+        return await ctx.embed(
+            description=f"{EMOJIS.ADD} {ctx.author.mention}: Added {role.mention} to **{len(targets)}** bot(s).",
+            color=0x38A9E1,
+        )
+
+    @role.command(name="bots_remove", description="Remove a role from all bots.", example="role bots_remove @role")
+    @has_permissions(manage_roles=True)
+    async def role_bots_remove(self, ctx: Context, *, role: Role):
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn("I cannot manage this role.")
+        targets = [m for m in ctx.guild.members if m.bot and role in m.roles]  # type: ignore
+        if not targets:
+            return await ctx.warn("No **bots** have this role.")
+        await self._mass_role_remove(ctx, targets, role)
+        return await ctx.embed(
+            description=f"{EMOJIS.REMOVE} {ctx.author.mention}: Removed {role.mention} from **{len(targets)}** bot(s).",
+            color=0x38A9E1,
+        )
+
+    @role.command(name="has", description="Add a role to members having another role.", example="role has @role @newrole")
+    @has_permissions(manage_roles=True)
+    async def role_has(self, ctx: Context, role: Role, *, assign_role: Role):
+        if not self._role_assignable(ctx, assign_role):
+            return await ctx.warn("I cannot manage the role to assign.")
+        targets = [m for m in ctx.guild.members if role in m.roles and assign_role not in m.roles]  # type: ignore
+        if not targets:
+            return await ctx.warn("No members match that filter.")
+        await self._mass_role_add(ctx, targets, assign_role)
+        return await ctx.embed(
+            description=f"{EMOJIS.ADD} {ctx.author.mention}: Added {assign_role.mention} to **{len(targets)}** member(s) with {role.mention}.",
+            color=0x38A9E1,
+        )
+
+    @role.command(name="has_remove", description="Remove a role from members having another role.", example="role has_remove @role @oldrole")
+    @has_permissions(manage_roles=True)
+    async def role_has_remove(self, ctx: Context, role: Role, *, remove_role: Role):
+        if not self._role_assignable(ctx, remove_role):
+            return await ctx.warn("I cannot manage the role to remove.")
+        targets = [m for m in ctx.guild.members if role in m.roles and remove_role in m.roles]  # type: ignore
+        if not targets:
+            return await ctx.warn("No members match that filter.")
+        await self._mass_role_remove(ctx, targets, remove_role)
+        return await ctx.embed(
+            description=f"{EMOJIS.REMOVE} {ctx.author.mention}: Removed {remove_role.mention} from **{len(targets)}** member(s) with {role.mention}.",
+            color=0x38A9E1,
+        )
+
+    @role.command(name="cancel", aliases=["kill"], description="Cancel a running mass-role task.", example="role cancel")
+    @has_permissions(manage_roles=True)
+    async def role_cancel(self, ctx: Context):
+        cancelled = 0
+        for key, task in list(self._mass_tasks.items()):
+            if key[0] == ctx.guild.id:  # type: ignore
+                try:
+                    task.cancel()
+                    cancelled += 1
+                except Exception:
+                    continue
+        if not cancelled:
+            return await ctx.warn("No running mass-role task found.")
+        return await ctx.approve(f"Cancelled **{cancelled}** mass-role task(s).")
+
+    @role.command(name="topcolor", aliases=["topcolour", "tc"], description="Change your top role's color.", example="role topcolor #ff0000")
+    @has_permissions(manage_roles=True)
+    async def role_topcolor(self, ctx: Context, colour: str, member: Member = None):  # type: ignore
+        target = member or ctx.author
+        if not re.match(r"^#?[0-9A-Fa-f]{6}$", colour):
+            return await ctx.warn("Provide a valid hex color like `#ff0000`.")
+        top = max(
+            (r for r in target.roles if not r.is_default()),
+            key=lambda r: r.position,
+            default=None,
+        )
+        if top is None:
+            return await ctx.warn("That member has no manageable role.")
+        if target != ctx.author and ctx.author.top_role.position <= top.position:
+            return await ctx.warn("You cannot edit a role above your own.")
+        if top.position >= ctx.guild.me.top_role.position:  # type: ignore
+            return await ctx.warn("I cannot edit a role above my own.")
+        hexed = colour if colour.startswith("#") else f"#{colour}"
+        try:
+            await top.edit(
+                color=discord.Color(int(hexed.lstrip("#"), 16)),
+                reason=f"Top color set by {ctx.author}",
+            )
+        except (Forbidden, HTTPException) as exc:
+            return await ctx.warn(f"Cannot edit color: `{exc}`")
+        return await ctx.approve(f"Changed {top.mention}'s color to `{hexed}`.")
+
+    @role.command(name="dump", description="List members having a role.", example="role dump @role")
+    @has_permissions(manage_roles=True)
+    async def role_dump(self, ctx: Context, *, role: Role):
+        members = [m for m in ctx.guild.members if role in m.roles]  # type: ignore
+        if not members:
+            return await ctx.warn(f"No members have {role.mention}.")
+        entries = [
+            f"`{i}` {m.mention} (`{m.id}`)" for i, m in enumerate(members, start=1)
+        ]
+        embeds = []
+        embed = Embed(
+            color=COLORS.neutral,
+            title=f"Members with {role.name} ({len(entries)})",
+            description="",
+        )
+        count = 0
+        for entry in entries:
+            embed.description += f"{entry}\n"  # type: ignore
+            count += 1
+            if count == 10:
+                embeds.append(embed)
+                embed = Embed(
+                    color=COLORS.neutral,
+                    title=f"Members with {role.name} ({len(entries)})",
+                    description="",
+                )
+                count = 0
+        if count > 0:
+            embeds.append(embed)
+        if len(embeds) > 1:
+            await ctx.paginate(embeds)
+        else:
+            await ctx.send(embed=embeds[0])
+
+    @role.command(
+        name="humans_remove",
+        description="Remove a role from all humans.",
+        example="role humans_remove @role",
+    )
+    @has_permissions(manage_roles=True)
+    async def role_humans_remove_cmd(self, ctx: Context, *, role: Role):
+        if not self._role_assignable(ctx, role):
+            return await ctx.warn(
+                "I cannot manage this role (it is above me or above you)."
+            )
+        targets = [
+            m for m in ctx.guild.members  # type: ignore
+            if not m.bot and role in m.roles
+        ]
+        if not targets:
+            return await ctx.warn("No **humans** have this role.")
+        await self._mass_role_remove(ctx, targets, role)
+        return await ctx.embed(
+            description=f"{EMOJIS.REMOVE} {ctx.author.mention}: Removed {role.mention} from **{len(targets)}** human members.",
+            color=0x38A9E1,
+        )
 
 
 class NukeConfirm(View):

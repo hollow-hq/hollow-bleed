@@ -4,8 +4,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 # group name -> (slash description, help text)
+# NOTE: prefix commands stay top-level (`,warn`, `,tempban`, ...) while their
+# slash counterparts are nested under these groups. Discord allows max 100
+# top-level slash commands globally and max 25 subcommands per group, so the
+# moderation surface is split into four groups instead of one.
 NESTED_GROUPS: dict[str, tuple[str, str]] = {
     "moderation": ("Moderation commands.", "Ban, kick, mute and more."),
+    "cases": ("Case and warning commands.", "Warn, review and track moderation cases."),
+    "punish": ("Punishment commands.", "Temporary bans, jail, timeouts and mass unban."),
+    "modtools": ("Moderation utilities.", "Slowmode, threads, invites, topics and more."),
+    "fun": ("Fun commands.", "Rate, ship, roast and more."),
+    "tools": ("Utility commands.", "Image tools, lookups and converters."),
+    "miscellaneous": ("Miscellaneous commands.", "AFK, embeds, polls and more."),
+    "server": ("Server commands.", "Welcome, prefixes, snipes, counters and more."),
     "music": ("Music player commands.", "Play and control music."),
     "information": ("Information commands.", "Look up users, servers and bot info."),
     # ``giveaway`` is declared as a real hybrid group inside ``cogs.engagement``
@@ -16,7 +27,7 @@ NESTED_GROUPS: dict[str, tuple[str, str]] = {
 
 # command name -> group name (slash path becomes /<group> <command>)
 NESTED_COMMANDS: dict[str, str] = {
-    # Moderation commands (all 19 moderation commands, well within the 25 limit)
+    # Core moderation commands (19, slash: /moderation ...)
     "ban": "moderation",
     "kick": "moderation",
     "unban": "moderation",
@@ -37,6 +48,51 @@ NESTED_COMMANDS: dict[str, str] = {
     "reveal": "moderation",
     "hide": "moderation",
 
+    # Case records (9, slash: /cases ...)
+    "warn": "cases",
+    "warnings": "cases",
+    "history": "cases",
+    "case": "cases",
+    "reason": "cases",
+    "modstats": "cases",
+    "modhistory": "cases",
+    "proof": "cases",
+    "notes": "cases",
+
+    # Punishments (12, slash: /punish ...)
+    "tempban": "punish",
+    "softban": "punish",
+    "hardban": "punish",
+    "recentban": "punish",
+    "unbanall": "punish",
+    "timeout": "punish",
+    "untimeout": "punish",
+    "jail": "punish",
+    "unjail": "punish",
+    "jaillist": "punish",
+    "temprole": "punish",
+    "raid": "punish",
+
+    # Moderation utilities (18, slash: /modtools ...)
+    "slowmode": "modtools",
+    "revokefiles": "modtools",
+    "topic": "modtools",
+    "talk": "modtools",
+    "unhide": "modtools",
+    "moveall": "modtools",
+    "clearinvites": "modtools",
+    "newmembers": "modtools",
+    "rename": "modtools",
+    "permissions": "modtools",
+    "setup": "modtools",
+    "setupmute": "modtools",
+    "restrictcommand": "modtools",
+    "stickyrole": "modtools",
+    "naughty": "modtools",
+    "remind": "modtools",
+    "reminders": "modtools",
+    "thread": "modtools",
+
     # Music commands
     "play": "music",
     "skip": "music",
@@ -47,19 +103,131 @@ NESTED_COMMANDS: dict[str, str] = {
     "userinfo": "information",
     "serverinfo": "information",
 
+    # Server identity & stats (slash: /information ...).
+    "avatar": "information",
+    "banner": "information",
+    "botinfo": "information",
+    "serveravatar": "information",
+    "serverbanner": "information",
+    "guildicon": "information",
+    "guildbanner": "information",
+    "splash": "information",
+    "membercount": "information",
+    "members": "information",
+    "roles": "information",
+    "roleinfo": "information",
+    "boosters": "information",
+    "bots": "information",
+    "invite": "information",
+    "inviteinfo": "information",
+    "banreason": "information",
+    "bans": "information",
+
+    # Lookup & converter utilities (17, slash: /tools ...).
+    # NOTE: ``ping``/``uptime``/``status``/``channelinfo`` live here rather
+    # than /information so that group keeps headroom under the 25-cap.
+    "ping": "tools",
+    "uptime": "tools",
+    "status": "tools",
+    "channelinfo": "tools",
+    "hex": "tools",
+    "invert": "tools",
+    "rotate": "tools",
+    "compress": "tools",
+    "define": "tools",
+    "emoji": "tools",
+    "emotes": "tools",
+    "github": "tools",
+    "minecraft": "tools",
+    "weather": "tools",
+    "timezone": "tools",
+    "seen": "tools",
+    "sticker": "tools",
+
+    # Fun singletons & flat groups (15, slash: /fun ...).
+    # NOTE: ``birthday`` and ``chatbot`` stay top-level: they own subgroups,
+    # which cannot nest two levels deep under /fun.
+    "base64": "fun",
+    "8ball": "fun",
+    "bitches": "fun",
+    "chatgpt": "fun",
+    "diary": "fun",
+    "dih": "fun",
+    "dihr": "fun",
+    "howautism": "fun",
+    "howgay": "fun",
+    "howlesbian": "fun",
+    "howsimp": "fun",
+    "imagine": "fun",
+    "roast": "fun",
+    "ship": "fun",
+    "tts": "fun",
+
+    # Miscellaneous singletons (9, slash: /miscellaneous ...).
+    "afk": "miscellaneous",
+    "createembed": "miscellaneous",
+    "donate": "miscellaneous",
+    "embedcode": "miscellaneous",
+    "pin": "miscellaneous",
+    "quickpoll": "miscellaneous",
+    "suggest": "miscellaneous",
+    "unpin": "miscellaneous",
+    "urban": "miscellaneous",
+
+    # Server management groups & utilities (15, slash: /server ...).
+    # NOTE: ``prefix`` stays top-level: it owns the ``self``/``noprefix``
+    # subgroups, which cannot nest two levels deep under /server.
+    "welcome": "server",
+    "alias": "server",
+    "autorole": "server",
+    "stickymessage": "server",
+    "boosts": "server",
+    "autoresponder": "server",
+    "boosterrole": "server",
+    "leaves": "server",
+    "fakeperms": "server",
+    "reactionsnipe": "server",
+    "editsnipe": "server",
+    "snipe": "server",
+    "clearsnipes": "server",
+    "counters": "server",
+    "customize": "server",
+
+    # Music player preset joins the existing /music group.
+    "preset": "music",
+
     # Engagement: the ``giveaway`` hybrid group is declared inside
     # ``cogs.engagement`` and owns all of its own subcommands (start, end,
     # reroll, list, channel, entries and the edit / blacklist sub-groups), so no
-    # routing entries are required here.
+    # routing entries are required here. ``highlight`` owns the ``ignore``
+    # subgroup so it cannot nest; ``level`` alone would trade one top-level
+    # slot for another, so both stay top-level.
 }
 
 # commands that must NOT be registered as slash at all (prefix only)
+# NOTE: owner commands are prefix-only on purpose. They are bot-owner-only
+# tools hidden from help, and each slash registration consumes one of
+# Discord's 100 global top-level slots. Keeping them prefix-only frees ~13
+# slots so feature cogs fit under the cap with headroom to spare.
 TEXT_ONLY: dict[str, str] = {
     # "eval": "owner only",
     # ``level exempt`` uses ``Greedy`` (a prefix-only converter) for its channel
     # arguments, which cannot be represented as a slash command, so it is
     # registered as prefix-only.
     "level_exempt": "Greedy channel argument cannot be a slash command",
+    "whitelist": "owner only",
+    "portal": "owner only",
+    "guilds": "owner only",
+    "blacklist": "owner only",
+    "restart": "owner only",
+    "push": "owner only",
+    "pull": "owner only",
+    "eval": "owner only",
+    "sql": "owner only",
+    "websitesync": "owner only",
+    "guild_blacklist": "owner only",
+    "guild_unblacklist": "owner only",
+    "debug": "owner only",
 }
 
 # prefix aliases for auto-created groups, e.g. ,mod -> moderation

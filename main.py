@@ -1,3 +1,4 @@
+import base.env  # noqa: F401  (loads .env first)
 from base.hollow import Bot
 from base.config import CLIENT
 import asyncio
@@ -148,6 +149,11 @@ bot = Bot()
 
 async def run_bot():
     global bot
+    if not CLIENT.TOKEN:
+        raise RuntimeError(
+            "Missing bot token. Set DISCORD_TOKEN (or HOLLOW_TOKEN/CLIENT_TOKEN) "
+            "in the environment or a .env file. See .env.example."
+        )
     bot = Bot()
     await bot.start(token=CLIENT.TOKEN)
 
