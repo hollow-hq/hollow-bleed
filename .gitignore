@@ -1,0 +1,11 @@
+.venv/
+base/config.py
+__pycache__/
+*.pyc
+hollowBleed.zip
+.kilo/
+.vscode/
+hollow-docs
+
+# https://github.com/hollow-hq/bleed
+Web
